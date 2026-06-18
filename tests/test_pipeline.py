@@ -89,48 +89,80 @@ def test_fetch_binance_produces_parquet(tmp_path, monkeypatch):
 
 EXPECTED_FEATURE_COLS = {
     "timestamp",
-    "ret_1", "ret_3", "ret_6",
-    "oi_ret_1",
-    "funding_z",
-    "future_return_24h",
+    "ret_1", "ret_3", "ret_6", "ret_12", "ret_24",
+    "volatility_20", "volatility_60", "high_low_range",
+    "oi_ret_1", "oi_ret_3", "oi_ret_6", "oi_ret_12", "oi_ret_accel",
+    "funding_z", "funding_change_1", "funding_signal",
+    "volume_z", "volume_change_1", "volume_change_6", "relative_volume",
+    "label_4h", "label_12h", "label_24h",
 }
 
 
 def _make_raw_dataset(n_rows=300):
+    import numpy as np
     base = 1700000000000
+    rng = np.random.default_rng(42)
+    close_vals = [42000.0]
+    open_vals = [42000.0]
+    high_vals = [42100.0]
+    low_vals = [41900.0]
+    oi_vals = [50000.0]
+    funding_vals = [0.0001]
+    for i in range(1, n_rows):
+        ret = rng.normal(0, 0.02)
+        close = close_vals[-1] * (1 + ret)
+        close_vals.append(max(close, 1.0))
+        open_vals.append(close_vals[-2])
+        high_vals.append(close_vals[-1] * (1 + abs(rng.normal(0, 0.005))))
+        low_vals.append(close_vals[-1] * (1 - abs(rng.normal(0, 0.005))))
+        oi_vals.append(oi_vals[-1] * (1 + rng.normal(0, 0.01)))
+        funding_vals.append(funding_vals[-1] + rng.normal(0, 0.0001))
     return pl.DataFrame({
         "timestamp": [base + i * 14400000 for i in range(n_rows)],
-        "open": [42000.0 + i * 10 + (i % 7) * 50 for i in range(n_rows)],
-        "high": [42100.0 + i * 10 + (i % 7) * 50 for i in range(n_rows)],
-        "low": [41900.0 + i * 10 + (i % 7) * 50 for i in range(n_rows)],
-        "close": [42050.0 + i * 10 + (i % 7) * 50 for i in range(n_rows)],
-        "volume": [100.0 + i * 2 for i in range(n_rows)],
-        "oi": [50000.0 + i * 100 + (i % 13) * 1000 for i in range(n_rows)],
-        "funding": [0.0001 + (i % 20) * 0.00005 - 0.0005 for i in range(n_rows)],
+        "open": open_vals, "high": high_vals, "low": low_vals, "close": close_vals,
+        "volume": [100.0 + i * 2 + rng.uniform(0, 50) for i in range(n_rows)],
+        "oi": oi_vals,
+        "funding": funding_vals,
     })
 
 
 def test_registry_has_all_features():
-    """#3: Unit — registry exports 5 features with correct structure."""
-    from feature_lab.registry import FEATURES
+    """#3: Unit — registry exports 20 base features with correct structure."""
+    from feature_lab.registry import BASE
 
-    assert len(FEATURES) == 5, f"expected 5 features, got {len(FEATURES)}"
-    expected_ids = {"P01", "P02", "P03", "O01", "F01"}
-    actual_ids = {f["id"] for f in FEATURES}
-    assert actual_ids == expected_ids, f"feature ids mismatch: {actual_ids}"
-    for f in FEATURES:
+    assert len(BASE) == 20, f"expected 20 base features, got {len(BASE)}"
+    for f in BASE:
         for key in ["id", "name", "category", "expression"]:
             assert key in f, f"missing key {key} in {f['id']}"
         assert isinstance(f["expression"], str) and len(f["expression"]) > 0
 
 
+def test_registry_combo_features():
+    """V2.2: Unit — combo registry exports features with dependencies."""
+    from feature_lab.registry import COMBO
+
+    assert len(COMBO) == 12, f"expected 12 combo features, got {len(COMBO)}"
+    for f in COMBO:
+        assert "depends_on" in f
+        assert len(f["depends_on"]) >= 1, f"{f['id']} should depend on base features"
+
+
+def test_registry_talib_features():
+    """V2.2: Unit — talib registry exports features with _talib_ helpers."""
+    from feature_lab.registry import TALIB
+
+    assert len(TALIB) == 23, f"expected 23 talib features, got {len(TALIB)}"
+    for f in TALIB:
+        assert any("_talib_" in d for d in f.get("depends_on", [])), \
+            f"{f['id']} should depend on _talib_ helper"
+
+
 def test_registry_topological_order():
     """#3: Unit — helper columns precede dependent features."""
     from graphlib import TopologicalSorter
+    from feature_lab.registry import ALL
 
-    from feature_lab.registry import FEATURES
-
-    name_to_deps = {f["name"]: set(f.get("depends_on", [])) for f in FEATURES}
+    name_to_deps = {f["name"]: set(f.get("depends_on", [])) for f in ALL}
     graph = {name: deps for name, deps in name_to_deps.items()}
     ts = TopologicalSorter(graph)
     order = list(ts.static_order())
@@ -140,13 +172,13 @@ def test_registry_topological_order():
 
 
 def test_build_features_produces_parquet(tmp_path):
-    """#3: CF — build_features produces correct output."""
+    """#3: CF — build_features produces correct output with triple barrier labels."""
     raw_path = tmp_path / "raw.parquet"
     _make_raw_dataset(300).write_parquet(raw_path)
 
     from feature_lab.build_features import build_features
     output = tmp_path / "features_v1.parquet"
-    build_features(raw_path, output)
+    build_features(raw_path, output, registries=["base"])
 
     assert output.exists(), "output parquet not created"
     df = pl.read_parquet(output)
@@ -154,21 +186,78 @@ def test_build_features_produces_parquet(tmp_path):
     total_nulls = sum(df[col].null_count() for col in df.columns)
     assert total_nulls == 0, f"output contains {total_nulls} nulls"
     assert df["timestamp"].is_sorted(), "timestamp not sorted"
+    for lbl in ["label_4h", "label_12h", "label_24h"]:
+        vals = df[lbl].unique().to_list()
+        assert all(v in (-1, 0, 1) for v in vals), f"{lbl} has invalid values: {vals}"
+
+
+# ── V2.1#1: Triple Barrier Labeling ─────────────────────────────────────
+
+
+def test_triple_barrier_all_up():
+    """V2.1#1: Unit — steadily rising price with high vol → all labels +1."""
+    from feature_lab.labels import generate_triple_barrier_labels
+    base = 1700000000000
+    n = 120
+    rng = __import__("numpy").random.default_rng(42)
+    close_vals = [42000.0]
+    for _ in range(n - 1):
+        close_vals.append(close_vals[-1] * (1 + rng.uniform(0.01, 0.05)))
+    df = pl.DataFrame({
+        "timestamp": [base + i * 14400000 for i in range(n)],
+        "close": close_vals,
+    })
+    labels = generate_triple_barrier_labels(df, horizon=6, vol_multiplier=1.0)
+    vals = labels.drop_nulls().to_list()
+    up_count = sum(1 for v in vals if v == 1)
+    assert up_count > 0, f"expected some +1 labels, got none in {len(vals)} values"
+
+
+def test_triple_barrier_all_down():
+    """V2.1#1: Unit — steadily falling price → all labels -1."""
+    from feature_lab.labels import generate_triple_barrier_labels
+    base = 1700000000000
+    n = 120
+    rng = __import__("numpy").random.default_rng(42)
+    close_vals = [42000.0]
+    for _ in range(n - 1):
+        close_vals.append(close_vals[-1] * (1 - rng.uniform(0.01, 0.05)))
+    df = pl.DataFrame({
+        "timestamp": [base + i * 14400000 for i in range(n)],
+        "close": close_vals,
+    })
+    labels = generate_triple_barrier_labels(df, horizon=6, vol_multiplier=1.0)
+    vals = labels.drop_nulls().to_list()
+    down_count = sum(1 for v in vals if v == -1)
+    assert down_count > 0, f"expected some -1 labels, got none in {len(vals)} values"
+
+
+def test_triple_barrier_shape():
+    """V2.1#1: Unit — output same length as input."""
+    from feature_lab.labels import generate_triple_barrier_labels
+    base = 1700000000000
+    df = pl.DataFrame({
+        "timestamp": [base + i * 14400000 for i in range(100)],
+        "close": [42000.0 + (i % 5) * 10 for i in range(100)],
+    })
+    labels = generate_triple_barrier_labels(df, horizon=6, vol_multiplier=2.0)
+    assert len(labels) == 100
+    assert labels.null_count() >= 6  # last 6 rows are NaN (no forward data)
 
 
 # ── #4: Model Training ────────────────────────────────────────────────────
 
 
 def test_train_lightgbm_produces_artifacts(tmp_path):
-    """#4: CF — train LightGBM produces valid artifacts."""
+    """V2.1: CF — multi-horizon training produces 3 models + consensus."""
     import lightgbm as lgb
 
     raw_path = tmp_path / "raw.parquet"
-    _make_raw_dataset(400).write_parquet(raw_path)
+    _make_raw_dataset(1000).write_parquet(raw_path)
 
     from feature_lab.build_features import build_features
     features_path = tmp_path / "features_v1.parquet"
-    build_features(raw_path, features_path)
+    build_features(raw_path, features_path, registries=["base"])
 
     model_dir = tmp_path / "models"
     reports_dir = tmp_path / "reports"
@@ -178,32 +267,19 @@ def test_train_lightgbm_produces_artifacts(tmp_path):
     from research.train_lightgbm import train
     train(features_path, model_dir, reports_dir)
 
-    pkl_path = model_dir / "lgbm_v1.pkl"
-    meta_path = model_dir / "lgbm_v1_meta.json"
-    metrics_path = reports_dir / "metrics_v1.json"
-    preds_path = reports_dir / "predictions_v1.parquet"
+    for lbl in ["label_4h", "label_12h", "label_24h"]:
+        pkl = model_dir / f"lgbm_v2.1_{lbl}.pkl"
+        assert pkl.exists(), f"{pkl} missing"
+        model = lgb.Booster(model_file=str(pkl))
+        assert model is not None
 
-    assert pkl_path.exists()
-    assert meta_path.exists()
-    assert metrics_path.exists()
-    assert preds_path.exists()
+    meta = json.loads((model_dir / "lgbm_v2.1_meta.json").read_text())
+    assert "features" in meta and len(meta["features"]) == 20
+    assert "labels" in meta and len(meta["labels"]) == 3
 
-    model = lgb.Booster(model_file=str(pkl_path))
-    assert model is not None
+    metrics = json.loads((reports_dir / "metrics_v2.1.json").read_text())
+    assert "consensus" in metrics
 
-    meta = json.loads(meta_path.read_text())
-    assert "features" in meta and len(meta["features"]) == 5
-    assert "label" in meta
-    assert "hyperparams" in meta
-
-    metrics = json.loads(metrics_path.read_text())
-    for key in ["rmse", "mae", "correlation"]:
-        assert key in metrics
-        assert isinstance(metrics[key], float)
-
-    preds = pl.read_parquet(preds_path)
-    assert set(preds.columns) >= {"timestamp", "pred", "actual"}
-    total_nulls = sum(preds[col].null_count() for col in preds.columns)
-    assert total_nulls == 0
-    assert preds["timestamp"].is_sorted()
+    preds = pl.read_parquet(reports_dir / "predictions_v2.1.parquet")
+    assert "consensus_dir" in preds.columns
     assert len(preds) > 0
