@@ -34,18 +34,4 @@ FEATURES = [
         "expression": "(funding - _funding_rm180) / (_funding_rs180 + 0.00000001)",
         "depends_on": ["_funding_rm180", "_funding_rs180"],
     },
-    {
-        "id": "L01",
-        "name": "liq_total",
-        "category": "liquidation",
-        "expression": "long_liq + short_liq",
-        "depends_on": [],
-    },
-    {
-        "id": "L02",
-        "name": "liq_shock",
-        "category": "liquidation",
-        "expression": "liq_total / (_liq_rm180 + 0.00000001)",
-        "depends_on": ["liq_total", "_liq_rm180"],
-    },
 ]

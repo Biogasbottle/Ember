@@ -83,6 +83,10 @@ _Avoid_: "LSTM", "Transformer", "deep learning" (deferred to later phases).
 > **Dev**: L02 depends on L01 — which runs first?
 > **Domain expert**: Topological sort handles that. Declare `depends_on` in registry.py and build_features.py will compute them in the right order automatically.
 
+## Principles
+
+**No placeholder data**: Every column in the raw dataset must come from a real data source. Never use zeros, constants, or synthetic values as stand-ins for unavailable data. If a data source cannot provide a column, that column must not exist in the raw dataset, and features depending on it must be removed from the registry. Placeholder data destroys research validity — a model trained on fake data produces fake results.
+
 ## Flagged ambiguities
 
 - "Strategy" is overloaded — use "Alpha" for the predictive component and "Execution" for the trading component.

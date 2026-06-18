@@ -52,13 +52,6 @@ def build_features(raw_path, output_path=OUTPUT_PATH):
         ).collect()
         ctx = pl.SQLContext(df=df)
 
-        needs_liq_rm = any("_liq_rm180" in f.get("depends_on", []) for f in FEATURES)
-        if name == "liq_total" and needs_liq_rm:
-                df = df.with_columns(
-                    pl.col("liq_total").rolling_mean(180, min_samples=1).alias("_liq_rm180"),
-                )
-                ctx = pl.SQLContext(df=df)
-
     logger.info("Computing label: %s", LABEL_NAME)
     df = ctx.execute(
         f"SELECT *, {LABEL_EXPRESSION} AS {LABEL_NAME} FROM df"

@@ -16,6 +16,10 @@
 
 Never forward-fill NaN produced by rolling windows or label shifts — those must be dropped.
 
+## Placeholder data
+
+Never fill missing raw data with constants (zeros, means, synthetic values). If a data source cannot provide a column (e.g. Binance liquidation API is offline), that column must not appear in the raw dataset. Features that depend on unavailable columns must be removed from the registry. The principle is: *no column in raw data without a real source*.
+
 ## Validation checklist
 
 Before training, verify:
